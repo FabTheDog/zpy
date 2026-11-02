@@ -1,7 +1,7 @@
 //! Python (ctypes) bindings generated from a Zig API, see src/bindgen.zig.
 //!
-//! Other packages call `addPythonPackage`, `addWheel` and `addPytest` from
-//! their build.zig through `@import("zpy")`.
+//! Other packages call `addPythonPackage`, `addWheel`, `addPytest` and
+//! `addPythonScript` from their build.zig through `@import("zpy")`.
 
 const std = @import("std");
 const zon = @import("build.zig.zon");
@@ -244,6 +244,28 @@ pub fn addPytest(b: *std.Build, options: Pytest) *std.Build.Step.Run {
     for (options.packages) |p| run.addDirectoryArg(p.dir);
     run.addDirectoryArg(options.tests);
     if (options.wheel) |wheel| run.addPrefixedFileArg("--wheel=", wheel);
+    return run;
+}
+
+pub const PythonScript = struct {
+    python: []const u8 = "python3",
+    /// Importable by the script, without being installed.
+    packages: []const StagedPackage,
+    script: std.Build.LazyPath,
+};
+
+/// Runs `options.script` as `__main__` with the staged packages on `sys.path`.
+pub fn addPythonScript(b: *std.Build, options: PythonScript) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{
+        options.python, "-B", "-c",
+        \\import runpy, sys
+        \\n = int(sys.argv[1])
+        \\sys.path[:0] = sys.argv[2:2 + n]
+        \\runpy.run_path(sys.argv[2 + n], run_name="__main__")
+    });
+    run.addArg(b.fmt("{d}", .{options.packages.len}));
+    for (options.packages) |p| run.addDirectoryArg(p.dir);
+    run.addFileArg(options.script);
     return run;
 }
 

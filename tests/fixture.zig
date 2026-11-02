@@ -210,6 +210,8 @@ pub const api = struct {
         return total;
     }
 
+    /// Occurrences of `color` in `colors`; see `byteSum` for bytes. Never
+    /// fails with `error.Empty`, and `null` is not a color.
     pub fn countColor(colors: []const Color, color: Color) usize {
         var n: usize = 0;
         for (colors) |c| n += @intFromBool(c == color);

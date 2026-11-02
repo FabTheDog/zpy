@@ -166,6 +166,8 @@ def test_slices():
     assert fixture.total_length(["ab", b"cde", ""]) == 5
     colors = [fixture.Color.red, fixture.Color.blue, fixture.Color.red]
     assert fixture.count_color(colors, fixture.Color.red) == 2
+    # Zig names in doc comments are spelled the Python way.
+    assert fixture.count_color.__doc__ == "Occurrences of `color` in `colors`; see `byte_sum` for bytes. Never\nfails with `Empty`, and `None` is not a color.\n"
     assert fixture.centroid([fixture.Vec2(0.0, 0.0), fixture.Vec2(2.0, 4.0)]) == fixture.Vec2(1.0, 2.0)
     with pytest.raises(fixture.Empty):
         fixture.centroid([])

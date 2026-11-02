@@ -18,6 +18,9 @@
 //! - Every signature is annotated: parameters with what they accept (see
 //!   `paramHint`), results with the class they return, so the module
 //!   type-checks as a `py.typed` package.
+//! - Doc comments become docstrings, with the Zig spellings inside backticks
+//!   turned into the Python ones: camelCase functions to snake_case,
+//!   `error.Name` to `Name`, `null`, `true` and `false` to their literals.
 
 const std = @import("std");
 const abi = @import("abi.zig");
@@ -528,19 +531,79 @@ fn writeDocstring(w: *Writer, doc: []const u8, indent: []const u8) !void {
     try w.print("{s}\"\"\"", .{indent});
     var lines = std.mem.splitScalar(u8, doc, '\n');
     var first = true;
+    var in_code = false; // inside a backtick span, which may continue on the next line
     while (lines.next()) |line| {
         if (!first) {
             try w.writeAll("\n");
             if (line.len > 0) try w.writeAll(indent);
         }
         first = false;
-        for (line) |c| switch (c) {
-            '\\', '"' => try w.print("\\{c}", .{c}),
-            else => try w.writeByte(c),
-        };
+        var i: usize = 0;
+        while (i < line.len) {
+            const c = line[i];
+            if (in_code and isIdent(c)) {
+                var end = i + 1;
+                while (end < line.len and isIdent(line[end])) end += 1;
+                try writePyName(w, line[i..end]);
+                // `error.Name` -> `Name`
+                if (std.mem.eql(u8, line[i..end], "error") and end < line.len and line[end] == '.') end += 1;
+                i = end;
+                continue;
+            }
+            switch (c) {
+                '`' => in_code = !in_code,
+                else => {},
+            }
+            switch (c) {
+                '\\', '"' => try w.print("\\{c}", .{c}),
+                else => try w.writeByte(c),
+            }
+            i += 1;
+        }
     }
     if (std.mem.indexOfScalar(u8, doc, '\n') != null) try w.print("\n{s}", .{indent});
     try w.writeAll("\"\"\"\n");
+}
+
+fn isIdent(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// A Zig identifier quoted in a doc comment, as Python spells it.
+fn writePyName(w: *Writer, name: []const u8) !void {
+    const literals = .{ .{ "null", "None" }, .{ "true", "True" }, .{ "false", "False" }, .{ "error", "" } };
+    inline for (literals) |l| if (std.mem.eql(u8, name, l[0])) return w.writeAll(l[1]);
+    // camelCase is a function (Zig's convention), snake_case in Python.
+    if (std.ascii.isLower(name[0])) {
+        for (name, 0..) |c, i| {
+            if (snakeBreak(name, i)) try w.writeByte('_');
+            try w.writeByte(std.ascii.toLower(c));
+        }
+    } else {
+        try w.writeAll(name);
+    }
+}
+
+test writePyName {
+    var buf: [64]u8 = undefined;
+    for ([_][2][]const u8{
+        .{ "addVolume", "add_volume" }, .{ "null", "None" },             .{ "Vec2", "Vec2" },
+        .{ "error", "" },               .{ "snake_case", "snake_case" }, .{ "x", "x" },
+    }) |case| {
+        var w: Writer = .fixed(&buf);
+        try writePyName(&w, case[0]);
+        try std.testing.expectEqualStrings(case[1], w.buffered());
+    }
+}
+
+test writeDocstring {
+    var buf: [256]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try writeDocstring(&w, "Calls `addVolume` or `Detector.init`, fails with `error.Empty`; returns `null` unless `x` is set.\nThe prose keeps addVolume.", "  ");
+    try std.testing.expectEqualStrings(
+        "  \"\"\"Calls `add_volume` or `Detector.init`, fails with `Empty`; returns `None` unless `x` is set.\n  The prose keeps addVolume.\n  \"\"\"\n",
+        w.buffered(),
+    );
 }
 
 fn lastSegment(comptime path: []const u8) []const u8 {
@@ -575,18 +638,21 @@ pub fn snakeCase(comptime name: []const u8) []const u8 {
     return comptime blk: {
         var out: []const u8 = "";
         for (name, 0..) |c, i| {
-            if (std.ascii.isUpper(c) and i > 0 and name[i - 1] != '_') {
-                const prev = name[i - 1];
-                const next_lower = i + 1 < name.len and std.ascii.isLower(name[i + 1]);
-                if (std.ascii.isLower(prev) or std.ascii.isDigit(prev) or (std.ascii.isUpper(prev) and next_lower)) {
-                    out = out ++ "_";
-                }
-            }
+            if (snakeBreak(name, i)) out = out ++ "_";
             out = out ++ .{std.ascii.toLower(c)};
         }
         const final = out[0..out.len].*;
         break :blk &final;
     };
+}
+
+/// Whether snake_case puts an underscore before `name[i]`.
+fn snakeBreak(name: []const u8, i: usize) bool {
+    const c = name[i];
+    if (!std.ascii.isUpper(c) or i == 0 or name[i - 1] == '_') return false;
+    const prev = name[i - 1];
+    const next_lower = i + 1 < name.len and std.ascii.isLower(name[i + 1]);
+    return std.ascii.isLower(prev) or std.ascii.isDigit(prev) or (std.ascii.isUpper(prev) and next_lower);
 }
 
 test snakeCase {

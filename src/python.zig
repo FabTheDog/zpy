@@ -289,6 +289,7 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 .handle => api.typeName(abi.HandleOf(T).?),
                 .optional => "_opt(" ++ codec(@typeInfo(T).optional.child) ++ ")",
                 .slice => "_slice(" ++ codec(@typeInfo(T).pointer.child) ++ ")",
+                .buffer => "_buffer(" ++ codec(@typeInfo(T).pointer.child) ++ ")",
                 .string => "_str",
                 .void => "None",
                 .unsupported => unreachable,
@@ -306,7 +307,8 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 .optional => hint(@typeInfo(T).optional.child) ++ " | None",
                 .slice => "list[" ++ hint(@typeInfo(T).pointer.child) ++ "]",
                 .string => "str",
-                .void, .unsupported => unreachable,
+                // Never a field.
+                .buffer, .void, .unsupported => unreachable,
             };
         }
 

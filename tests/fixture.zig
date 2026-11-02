@@ -216,6 +216,17 @@ pub const api = struct {
         return n;
     }
 
+    /// Writes i * i to out[i].
+    pub fn fillSquares(out: []u32) void {
+        for (out, 0..) |*o, i| o.* = @intCast(i * i);
+    }
+
+    /// out[i] = xs[i] * k, failing when the lengths differ.
+    pub fn scaleInto(xs: []const f64, k: f64, out: []f64) error{LengthMismatch}!void {
+        if (xs.len != out.len) return error.LengthMismatch;
+        for (out, xs) |*o, x| o.* = x * k;
+    }
+
     pub fn centroid(points: []const Vec2) error{Empty}!Vec2 {
         if (points.len == 0) return error.Empty;
         var c: Vec2 = Vec2.zero;
@@ -237,8 +248,9 @@ pub const api = struct {
         _ = x;
     }
 
-    pub fn mutable(buffer: []u8) void {
-        _ = buffer;
+    /// Writes through a slice of structs would not reach Python.
+    pub fn mutable(points: []Vec2) void {
+        _ = points;
     }
 
     pub fn hidden() void {}
@@ -250,7 +262,7 @@ fn context() api.Context {
 
 pub const config: bindgen.Config = .{
     .prefix = "fixture",
-    .errors = &.{ error.DivisionByZero, error.NameTooLong, error.OutOfBounds, error.Empty },
+    .errors = &.{ error.DivisionByZero, error.NameTooLong, error.OutOfBounds, error.Empty, error.LengthMismatch },
     .skip = &.{"hidden"},
     .inject = &.{.of(context)},
 };

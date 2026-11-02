@@ -18,6 +18,9 @@ pub const Kind = enum {
     optional,
     /// `[]const T`, parameters only: `extern struct { ptr, len }`.
     slice,
+    /// `[]T` of ints, floats or bools, parameters only: `extern struct { ptr, len }`
+    /// pointing into a writable Python buffer, which the call fills in place.
+    buffer,
     /// Owned by Zig (`T` by value, `*T` or `*const T`); Python holds a pointer
     /// to a heap copy made by the thunk returning it. `std.mem.Allocator` and
     /// `std.Io` are handles too, filled in by the library (see `isInjected`).
@@ -84,9 +87,12 @@ fn pointerKind(comptime T: type) Kind {
     if (isString(T)) return .string;
     const ptr = @typeInfo(T).pointer;
     switch (ptr.size) {
-        .slice => if (ptr.attrs.@"const" and ptr.sentinel_ptr == null) switch (kindOf(ptr.child)) {
+        .slice => if (ptr.sentinel_ptr != null) {} else if (ptr.attrs.@"const") switch (kindOf(ptr.child)) {
             .slice, .string => return .slice,
             else => |kind| if (kind.isData()) return .slice,
+        } else switch (kindOf(ptr.child)) {
+            .bool, .int, .float => return .buffer,
+            else => {},
         },
         .one => if (@typeInfo(ptr.child) == .@"struct" and kindOf(ptr.child) == .handle) return .handle,
         else => {},
@@ -153,6 +159,7 @@ pub fn Abi(comptime T: type) type {
         .@"union" => UnionMirror(T),
         .optional => extern struct { some: bool, value: Abi(@typeInfo(T).optional.child) },
         .slice => extern struct { ptr: ?[*]const Abi(@typeInfo(T).pointer.child), len: usize },
+        .buffer => extern struct { ptr: ?[*]@typeInfo(T).pointer.child, len: usize },
         .handle => ?*anyopaque,
         .string => ?[*:0]const u8,
         // Union payloads only: an extern union needs a field per variant.
@@ -232,7 +239,7 @@ pub fn toAbi(comptime T: type, v: T) Abi(T) {
             return if (v) |c| .{ .some = true, .value = toAbi(C, c) } else std.mem.zeroes(Abi(T));
         },
         .handle => return @ptrCast(@constCast(v)),
-        .slice, .string, .unsupported => @compileError("bindgen: cannot return " ++ @typeName(T)),
+        .slice, .buffer, .string, .unsupported => @compileError("bindgen: cannot return " ++ @typeName(T)),
     }
 }
 
@@ -274,6 +281,13 @@ pub fn fromAbi(comptime T: type, a: Abi(T), arena: std.mem.Allocator) ConvertErr
             const out = try arena.alloc(E, a.len);
             for (out, items) |*o, item| o.* = try fromAbi(E, item, arena);
             return out;
+        },
+        .buffer => {
+            const E = @typeInfo(T).pointer.child;
+            // An empty buffer may come with a null pointer; a dangling but
+            // aligned one keeps the slice valid.
+            const ptr = a.ptr orelse if (a.len == 0) @as([*]E, @ptrFromInt(@alignOf(E))) else return error.InvalidArgument;
+            return ptr[0..a.len];
         },
         .string => {
             const ptr = a orelse return error.InvalidArgument;
@@ -342,7 +356,7 @@ fn checkFn(comptime cfg: Config, comptime F: type) ?[]const u8 {
         .bool, .int, .float, .@"enum", .value, .@"union", .optional => handlesIn(T).len == 0,
         // Borrowed pointers would outlive their owner in Python.
         .handle => @typeInfo(T) != .pointer,
-        .slice, .string, .unsupported => false,
+        .slice, .buffer, .string, .unsupported => false,
     };
     if (!returnable) return std.fmt.comptimePrint("unsupported return type {s}", .{@typeName(T)});
     return null;
@@ -374,6 +388,7 @@ pub fn describe(comptime T: type) []const u8 {
         },
         .optional => "?" ++ describe(@typeInfo(T).optional.child),
         .slice => "[]" ++ describe(@typeInfo(T).pointer.child),
+        .buffer => "[]var " ++ describe(@typeInfo(T).pointer.child),
         .handle => "handle",
         .string => "string",
         .unsupported => @compileError("bindgen: cannot describe " ++ @typeName(T)),
@@ -410,7 +425,11 @@ test kindOf {
     try std.testing.expectEqual(.string, kindOf([:0]const u8));
     try std.testing.expectEqual(.slice, kindOf([]const u8));
     try std.testing.expectEqual(.slice, kindOf([]const []const u8));
-    try std.testing.expectEqual(.unsupported, kindOf([]u8));
+    try std.testing.expectEqual(.buffer, kindOf([]u8));
+    try std.testing.expectEqual(.buffer, kindOf([]f64));
+    try std.testing.expectEqual(.buffer, kindOf([]bool));
+    try std.testing.expectEqual(.unsupported, kindOf([]Vec)); // writes would not reach Python
+    try std.testing.expectEqual(.unsupported, kindOf([:0]u8));
     try std.testing.expectEqual(.handle, kindOf(std.mem.Allocator));
     try std.testing.expectEqual(.handle, kindOf(*const Owner));
     try std.testing.expectEqual(.unsupported, kindOf(*Vec));
@@ -472,7 +491,16 @@ test "slices" {
     try std.testing.expectEqual(0, (try fromAbi([]const f64, .{ .ptr = null, .len = 0 }, a)).len);
     try std.testing.expectError(error.InvalidArgument, fromAbi([]const f64, .{ .ptr = null, .len = 1 }, a));
     try std.testing.expectError(error.InvalidArgument, fromAbi([:0]const u8, null, a));
+
+    var cells = [_]u32{ 0, 0 };
+    const out = try fromAbi([]u32, .{ .ptr = &cells, .len = 2 }, no_arena_for_buffers);
+    out[1] = 5;
+    try std.testing.expectEqual(5, cells[1]); // written in place
+    try std.testing.expectEqual(0, (try fromAbi([]u32, .{ .ptr = null, .len = 0 }, no_arena_for_buffers)).len);
+    try std.testing.expectError(error.InvalidArgument, fromAbi([]u32, .{ .ptr = null, .len = 1 }, no_arena_for_buffers));
 }
+
+const no_arena_for_buffers = std.testing.failing_allocator;
 
 test whyUnsupported {
     const cfg: Config = .{ .prefix = "t" };
@@ -485,6 +513,7 @@ test whyUnsupported {
             _ = x;
         }
         fn mutable(_: []u8) void {}
+        fn mutableStructs(_: []Owner) void {}
         fn any() anyerror!void {}
         fn borrowed(o: *Owner) *Owner {
             return o;
@@ -495,7 +524,8 @@ test whyUnsupported {
     };
     try std.testing.expectEqual(null, whyUnsupported(cfg, @TypeOf(S.ok)));
     try std.testing.expectEqualStrings("generic function", whyUnsupported(cfg, @TypeOf(S.generic)).?);
-    try std.testing.expect(whyUnsupported(cfg, @TypeOf(S.mutable)) != null);
+    try std.testing.expectEqual(null, whyUnsupported(cfg, @TypeOf(S.mutable)));
+    try std.testing.expect(whyUnsupported(cfg, @TypeOf(S.mutableStructs)) != null);
     try std.testing.expectEqualStrings("returns anyerror", whyUnsupported(cfg, @TypeOf(S.any)).?);
     try std.testing.expect(whyUnsupported(cfg, @TypeOf(S.borrowed)) != null);
     try std.testing.expectEqual(null, whyUnsupported(cfg, @TypeOf(S.boxed)));

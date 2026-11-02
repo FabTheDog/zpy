@@ -95,11 +95,11 @@ def test_handle_type_checks():
 def test_skipped_declarations():
     assert not hasattr(fixture, "generic")  # anytype parameter
     assert not hasattr(fixture, "hidden")  # config.skip
-    assert not hasattr(fixture, "mutable")  # []u8: Zig would write into it
+    assert not hasattr(fixture, "mutable")  # []Vec2: writes would not reach Python
     assert not hasattr(fixture.Canvas, "deinit")  # called by close()
     assert fixture.__skipped__["generic"] == "generic function"
     assert fixture.__skipped__["hidden"] == "listed in config.skip"
-    assert "[]u8" in fixture.__skipped__["mutable"]
+    assert "[]fixture.api.Vec2" in fixture.__skipped__["mutable"]
 
 
 def test_docs_and_parameter_names():
@@ -157,6 +157,24 @@ def test_slices():
         fixture.centroid([])
     with pytest.raises(ValueError):
         fixture.count_color([7], fixture.Color.red)  # rejected by IntEnum
+
+
+def test_buffers():
+    squares = array.array("I", [0] * 4)
+    fixture.fill_squares(squares)
+    assert list(squares) == [0, 1, 4, 9]  # written in place
+    fixture.fill_squares(array.array("I"))  # empty is fine
+    out = array.array("d", [0.0, 0.0])
+    fixture.scale_into([1.0, 2.0], 3.0, out)
+    assert list(out) == [3.0, 6.0]
+    with pytest.raises(fixture.LengthMismatch):
+        fixture.scale_into([1.0], 3.0, out)
+    with pytest.raises(TypeError):
+        fixture.fill_squares(bytes(4))  # read-only
+    with pytest.raises(TypeError):
+        fixture.fill_squares(array.array("d", [0.0]))  # wrong element type
+    with pytest.raises(TypeError):
+        fixture.fill_squares([0, 0])  # not a buffer
 
 
 def test_handle_references_in_values():

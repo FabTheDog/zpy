@@ -205,8 +205,31 @@ class _SliceAbi:
         return self.ctype(a, len(a))
 
 
+class _BufferAbi:
+    """`[]T` of scalars: a writable, contiguous, 1-d buffer of T (array.array,
+    bytearray, numpy array, ...) that the call fills in place."""
+
+    def __init__(self, elem):
+        self.elem = _codec(elem)
+        self.ctype = _struct(f"_Abi_buffer_{self.elem.ctype.__name__}", [("ptr", _c.POINTER(self.elem.ctype)), ("len", _c.c_size_t)])
+
+    def to_abi(self, v):
+        want = self.elem.ctype._type_
+        try:
+            view = memoryview(v)
+        except TypeError:
+            raise TypeError(f"expected a writable buffer of '{want}', got {type(v).__name__}") from None
+        if view.readonly or view.ndim != 1 or not view.c_contiguous or view.format.lstrip("@=") != want:
+            shape = "readonly" if view.readonly else f"{view.ndim}-d{'' if view.c_contiguous else ' non-contiguous'} '{view.format}'"
+            raise TypeError(f"expected a writable, contiguous 1-d buffer of '{want}', got a {shape} one")
+        # Shares the memory, so the call writes straight into the caller's buffer.
+        a = (self.elem.ctype * len(view)).from_buffer(view)
+        return self.ctype(a, len(a))
+
+
 _opt = _ft.cache(_OptAbi)
 _slice = _ft.cache(_SliceAbi)
+_buffer = _ft.cache(_BufferAbi)
 
 
 class _HandleAbi:

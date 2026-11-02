@@ -7,8 +7,12 @@ import array
 import gc
 import importlib.util
 import math
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -90,6 +94,16 @@ def test_handle_type_checks():
         with pytest.raises(TypeError):
             fixture.Canvas.count(fixture.Vec2(1.0, 1.0))
         assert fixture.Canvas.count(canvas) == 0
+
+
+@pytest.mark.skipif(shutil.which("pyright") is None, reason="pyright not installed")
+def test_type_completeness():
+    """The generated module is a fully typed package: every public symbol
+    has a known type (PEP 561, checked with pyright)."""
+    env = {**os.environ, "PYTHONPATH": os.path.dirname(fixture.__path__[0])}
+    result = subprocess.run(["pyright", "--pythonpath", sys.executable, "--verifytypes", "fixture", "--ignoreexternal"], env=env, capture_output=True, text=True)
+    assert "Type completeness score: 100%" in result.stdout, result.stdout
+    assert (pathlib.Path(fixture.__path__[0]) / "py.typed").exists()
 
 
 def test_skipped_declarations():

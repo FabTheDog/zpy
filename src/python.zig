@@ -15,6 +15,9 @@
 //!   the first parameter is the type, `__init__` for a handle's `init`,
 //!   static methods otherwise.
 //! - Constants of data types become class (or module) attributes.
+//! - Every signature is annotated: parameters with what they accept (see
+//!   `paramHint`), results with the class they return, so the module
+//!   type-checks as a `py.typed` package.
 
 const std = @import("std");
 const abi = @import("abi.zig");
@@ -58,7 +61,7 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 \\    raise ImportError(f"{{_lib._name}} was built from different sources than {{__file__}}: rebuild both")
                 \\
                 \\# Declaration path -> why it has no binding.
-                \\__skipped__ = {{
+                \\__skipped__: dict[str, str] = {{
                 \\
             , .{ lib_file, walk.Api.hashSymbol(cfg), comptime api.hash(cfg) });
             inline for (api.skipped) |s| {
@@ -116,6 +119,7 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             inline for (info.field_names, info.field_values) |name, value| {
                 try w.print("    {f} = {d}\n", .{ py(name), value });
             }
+            try g.writeClassAttrs(t);
             try g.writeMethods(t, true);
         }
 
@@ -126,17 +130,10 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             inline for (info.field_names, info.field_types, 0..) |name, F, i| {
                 try w.print("{s}{f}={s}", .{ if (i > 0) ", " else "", py(name), comptime codec(F) });
             }
-            // Python requires defaulted fields last unless they are keyword-only.
-            const kw_only = comptime blk: {
-                var seen_default = false;
-                for (info.field_attrs) |attrs| {
-                    if (attrs.default_value_ptr != null) seen_default = true else if (seen_default) break :blk true;
-                }
-                break :blk false;
-            };
+            const kw_only = comptime isKwOnly(t.T);
             try w.print(")\n@_dc.dataclass{s}\nclass {s}:\n", .{ if (kw_only) "(kw_only=True)" else "", t.name });
             const has_doc = try g.writeTypeDoc(t);
-            if (info.field_names.len == 0 and !has_doc and comptime methodCount(t.T) == 0) try w.writeAll("    pass\n");
+            if (info.field_names.len == 0 and !has_doc and comptime (methodCount(t.T) + classAttrCount(t)) == 0) try w.writeAll("    pass\n");
             inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
                 try w.print("    {f}: {s}", .{ py(name), comptime hint(F) });
                 if (comptime attrs.defaultValue(F)) |default| {
@@ -151,7 +148,18 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 }
                 try w.writeAll("\n");
             }
+            try g.writeClassAttrs(t);
             try g.writeMethods(t, has_doc or info.field_names.len > 0);
+        }
+
+        /// Whether the dataclass of `T` is keyword-only: Python requires
+        /// defaulted fields last otherwise.
+        fn isKwOnly(comptime T: type) bool {
+            var seen_default = false;
+            for (@typeInfo(T).@"struct".field_attrs) |attrs| {
+                if (attrs.default_value_ptr != null) seen_default = true else if (seen_default) return true;
+            }
+            return false;
         }
 
         fn writeUnion(g: G, comptime t: walk.Type) !void {
@@ -163,19 +171,81 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 try w.print(", {f}=({d}, {s})", .{ py(name), @backingInt(@field(Tag, name)), comptime codec(F) });
             }
             try w.print(")\nclass {s}(_Union):\n", .{t.name});
-            const has_doc = try g.writeTypeDoc(t);
-            inline for (info.field_names, info.field_types, 0..) |name, F, i| {
-                if (has_doc or i > 0) try w.writeAll("\n");
-                try w.writeAll("    @staticmethod\n");
-                switch (comptime abi.kindOf(F)) {
-                    .void => try w.print("    def {f}():\n        return {s}(\"{f}\")\n", .{ py(name), t.name, py(name) }),
-                    .value => try w.print("    def {f}(*args, **kwargs):\n        return {s}(\"{f}\", _payload({s}, args, kwargs))\n", .{
-                        py(name), t.name, py(name), comptime api.typeName(F),
-                    }),
-                    else => try w.print("    def {f}(value):\n        return {s}(\"{f}\", value)\n", .{ py(name), t.name, py(name) }),
+            _ = try g.writeTypeDoc(t);
+            // The active variant and its payload.
+            try w.writeAll("    tag: _Literal[");
+            inline for (info.field_names, 0..) |name, i| try w.print("{s}\"{f}\"", .{ if (i > 0) ", " else "", py(name) });
+            try w.writeAll("]\n    value: ");
+            comptime var has_void = false;
+            comptime var n_payloads = 0;
+            inline for (info.field_types) |F| {
+                if (F == void) {
+                    has_void = true;
+                } else {
+                    try w.print("{s}{s}", .{ if (n_payloads > 0) " | " else "", comptime hint(F) });
+                    n_payloads += 1;
                 }
             }
-            try g.writeMethods(t, has_doc or info.field_names.len > 0);
+            if (has_void) try w.print("{s}None", .{if (n_payloads > 0) " | " else ""});
+            try w.writeAll("\n");
+            try g.writeClassAttrs(t);
+            inline for (info.field_names, info.field_types) |name, F| {
+                try w.writeAll("\n");
+                switch (comptime abi.kindOf(F)) {
+                    .void => try w.print("    @staticmethod\n    def {f}() -> {s}:\n        return {s}(\"{f}\")\n", .{ py(name), t.name, t.name, py(name) }),
+                    .value => {
+                        // Typed as two overloads: the payload, or its fields.
+                        const payload = comptime api.typeName(F);
+                        try w.print("    @_overload\n    @staticmethod\n    def {f}(value: {s}, /) -> {s}: ...\n", .{ py(name), payload, t.name });
+                        try w.print("    @_overload\n    @staticmethod\n    def {f}(", .{py(name)});
+                        try writeFieldParams(w, F);
+                        try w.print(") -> {s}: ...\n", .{t.name});
+                        try w.print("    @staticmethod\n    def {f}(*args: _Any, **kwargs: _Any) -> {s}:\n        return {s}(\"{f}\", _payload({s}, args, kwargs))\n", .{
+                            py(name), t.name, t.name, py(name), payload,
+                        });
+                    },
+                    else => try w.print("    @staticmethod\n    def {f}(value: {s}) -> {s}:\n        return {s}(\"{f}\", value)\n", .{
+                        py(name), comptime paramHint(F), t.name, t.name, py(name),
+                    }),
+                }
+            }
+            try g.writeMethods(t, true);
+        }
+
+        /// The fields of the value `T` as parameters: `name: hint = default`.
+        fn writeFieldParams(w: *Writer, comptime T: type) !void {
+            const info = @typeInfo(T).@"struct";
+            if (comptime isKwOnly(T) and info.field_names.len > 0) try w.writeAll("*, ");
+            inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+                try w.print("{s}{f}: {s}", .{ if (i > 0) ", " else "", py(name), comptime hint(F) });
+                if (comptime attrs.defaultValue(F)) |default| {
+                    try w.writeAll(" = ");
+                    try writeLiteral(w, F, default);
+                }
+            }
+        }
+
+        /// Nested types and constants assigned to the class after its body,
+        /// declared in the body so type checkers know them.
+        fn classAttrCount(comptime t: walk.Type) usize {
+            var n: usize = 0;
+            for (api.types) |nested| if (parentOf(nested)) |parent| {
+                if (std.mem.eql(u8, parent, t.name)) n += 1;
+            };
+            for (api.constants) |c| if (c.container == t.T) {
+                n += 1;
+            };
+            return n;
+        }
+
+        fn writeClassAttrs(g: G, comptime t: walk.Type) !void {
+            const w = g.w;
+            inline for (api.types) |nested| if (comptime parentOf(nested)) |parent| if (comptime std.mem.eql(u8, parent, t.name)) {
+                try w.print("    {s}: _ClassVar[type[{s}]]\n", .{ comptime lastSegment(nested.path), nested.name });
+            };
+            inline for (api.constants) |c| if (c.container == t.T) {
+                try w.print("    {f}: _ClassVar[{s}]\n", .{ py(c.name), comptime hint(@TypeOf(@field(c.container, c.name))) });
+            };
         }
 
         fn writeHandle(g: G, comptime t: walk.Type) !void {
@@ -187,8 +257,9 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             }
             try w.print(")\nclass {s}({s}):\n", .{ t.name, base });
             const has_doc = try g.writeTypeDoc(t);
-            if (!has_doc and comptime methodCount(t.T) == 0) try w.writeAll("    pass\n");
-            try g.writeMethods(t, has_doc);
+            if (!has_doc and comptime (methodCount(t.T) + classAttrCount(t)) == 0) try w.writeAll("    pass\n");
+            try g.writeClassAttrs(t);
+            try g.writeMethods(t, has_doc or comptime classAttrCount(t) > 0);
         }
 
         fn methodCount(comptime T: type) usize {
@@ -249,10 +320,19 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             if (style == .static) try w.print("{s}@staticmethod\n", .{indent});
             try w.print("{s}def {f}(", .{ indent, py(if (style == .init) "__init__" else comptime snakeCase(f.name)) });
             if (style == .init) try w.writeAll(if (params.len > 0) "self, " else "self");
-            for (names, 0..) |name, i| {
-                try w.print("{s}{f}{s}", .{ if (i > 0) ", " else "", py(name), if (i >= first_default) "=None" else "" });
+            inline for (names, params, 0..) |name, P, i| {
+                if (i > 0) try w.writeAll(", ");
+                if (style == .method and i == 0) {
+                    try w.writeAll("self");
+                } else if (i >= first_default) {
+                    const optional = comptime abi.kindOf(P) == .optional;
+                    try w.print("{f}: {s}{s} = None", .{ py(name), comptime paramHint(P), if (optional) "" else " | None" });
+                } else {
+                    try w.print("{f}: {s}", .{ py(name), comptime paramHint(P) });
+                }
             }
-            try w.writeAll("):\n");
+            const T = abi.Payload(@typeInfo(F).@"fn".return_type.?);
+            try w.print(") -> {s}:\n", .{if (style == .init) "None" else comptime hint(T)});
             if (doc) |d| if (d.doc) |text| try writeDocstring(w, text, indent ++ "    ");
             try w.print("{s}    {s}_{s}(", .{ indent, if (style == .init) "self._adopt(" else "return ", f.symbol });
             for (names, 0..) |name, i| try w.print("{s}{f}", .{ if (i > 0) ", " else "", py(name) });
@@ -296,9 +376,10 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             };
         }
 
-        /// Type hint of a dataclass field.
+        /// Type hint of a dataclass field, a union payload or a result.
         fn hint(comptime T: type) []const u8 {
             return switch (abi.kindOf(T)) {
+                .void => "None",
                 .bool => "bool",
                 .int => "int",
                 .float => "float",
@@ -307,8 +388,33 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                 .optional => hint(@typeInfo(T).optional.child) ++ " | None",
                 .slice => "list[" ++ hint(@typeInfo(T).pointer.child) ++ "]",
                 .string => "str",
-                // Never a field.
-                .buffer, .void, .unsupported => unreachable,
+                // Never a field nor a result.
+                .buffer, .unsupported => unreachable,
+            };
+        }
+
+        /// Type hint of a parameter: what the codec accepts, which is wider
+        /// than `hint` for slices (any iterable, or a buffer), strings (bytes
+        /// and paths too), buffers, and unions (a payload class used by one
+        /// variant stands for that variant, see `_UnionAbi.by_type`).
+        fn paramHint(comptime T: type) []const u8 {
+            return switch (abi.kindOf(T)) {
+                .optional => paramHint(@typeInfo(T).optional.child) ++ " | None",
+                .slice => if (@typeInfo(T).pointer.child == u8) "_BytesLike" else "_Iterable[" ++ paramHint(@typeInfo(T).pointer.child) ++ "]",
+                .buffer => "_Buffer",
+                .string => "_StrLike",
+                .@"union" => blk: {
+                    var s: []const u8 = api.typeName(T);
+                    const info = @typeInfo(T).@"union";
+                    for (info.field_types) |F| {
+                        if (abi.kindOf(F) != .value) continue;
+                        var uses: usize = 0;
+                        for (info.field_types) |other| uses += @intFromBool(other == F);
+                        if (uses == 1) s = s ++ " | " ++ api.typeName(F);
+                    }
+                    break :blk s;
+                },
+                else => hint(T),
             };
         }
 

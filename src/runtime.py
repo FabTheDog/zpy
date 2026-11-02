@@ -11,9 +11,20 @@ import ctypes as _c
 import dataclasses as _dc
 import functools as _ft
 import os as _os
+import sys as _sys
+from collections.abc import Iterable as _Iterable
 from enum import IntEnum as _IntEnum
+from typing import Any as _Any, ClassVar as _ClassVar, Literal as _Literal, TypeAlias as _TypeAlias, TypeVar as _TypeVar, overload as _overload
 
 _lib = None  # the shared library, loaded by the generated module
+
+# Hints of what a parameter accepts, wider than the type a result has.
+_StrLike: _TypeAlias = "str | bytes | _os.PathLike[str]"
+_BytesLike: _TypeAlias = "str | bytes | _os.PathLike[str] | _Iterable[int]"
+if _sys.version_info >= (3, 12):
+    from collections.abc import Buffer as _Buffer
+else:
+    _Buffer: _TypeAlias = _Any
 
 
 class Error(Exception):
@@ -287,7 +298,7 @@ class _Fn:
         self.frame = _struct(f"_Frame_{symbol}", fields)
         self.call = _proto(symbol, _c.c_void_p)
 
-    def __call__(self, *args):
+    def __call__(self, *args: _Any) -> _Any:
         frame = self.frame(*[p.to_abi(a) for p, a in zip(self.params, args)])
         _check(self.call(_c.byref(frame)))
         if self.out is not None:
@@ -297,28 +308,31 @@ class _Fn:
 _fn = _Fn
 
 
+_H = _TypeVar("_H", bound="_Handle")
+
+
 class _Handle:
     """Object owned by the Zig library. Release it with close() or a with block."""
 
-    _h = None
-    _keep = ()
+    _h: _Any = None
+    _keep: _Any = ()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: _Any, **kwargs: _Any) -> None:
         raise TypeError(f"{type(self).__name__} has no init; use one of its static constructors")
 
     @classmethod
-    def _wrap(cls, h, keep=()):
+    def _wrap(cls: type[_H], h: _Any, keep: _Any = ()) -> _H:
         obj = cls.__new__(cls)
         obj._h = h
         obj._keep = keep
         return obj
 
-    def _adopt(self, other):
+    def _adopt(self, other: _Handle) -> None:
         """Takes over a handle just returned by the library."""
         self._h, self._keep = other._h, other._keep
         other._h = None
 
-    def close(self):
+    def close(self) -> None:
         h, self._h = self._h, None
         if h:
             try:
@@ -326,13 +340,13 @@ class _Handle:
             finally:
                 self._keep = ()
 
-    def __enter__(self):
+    def __enter__(self: _H) -> _H:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.close()
         except Exception:
@@ -343,18 +357,21 @@ class _Union:
     """Tagged union: `tag` names the active variant, `value` holds its payload."""
 
     __slots__ = ("tag", "value")
+    # Narrowed by each generated subclass to its variant names and payloads.
+    tag: _Any
+    value: _Any
 
-    def __init__(self, tag, value=None):
+    def __init__(self, tag: str, value: _Any = None):
         if tag not in type(self)._abi.variants:
             raise ValueError(f"{type(self).__name__} has no variant {tag!r}")
         self.tag = tag
         self.value = value
 
-    def __eq__(self, other):
-        return type(other) is type(self) and other.tag == self.tag and other.value == self.value
+    def __eq__(self, other: object) -> bool:
+        return type(other) is type(self) and other.tag == self.tag and other.value == self.value  # type: ignore[attr-defined]
 
-    __hash__ = None
+    __hash__: _ClassVar[None] = None  # type: ignore[assignment]
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         value = "" if self.value is None else repr(self.value)
         return f"{type(self).__name__}.{self.tag}({value})"

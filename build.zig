@@ -94,6 +94,8 @@ fn stagePackage(b: *std.Build, zpy: *std.Build, package: PythonPackage) StagedPa
     const staged = b.addWriteFiles();
     _ = staged.addCopyFile(py_module, b.fmt("{s}/__init__.py", .{package.name}));
     _ = staged.addCopyFile(lib.getEmittedBin(), b.fmt("{s}/{s}", .{ package.name, lib.out_filename }));
+    // PEP 561: the module is annotated, so type checkers may read it.
+    _ = staged.add(b.fmt("{s}/py.typed", .{package.name}), "");
 
     const install = b.addInstallDirectory(.{
         .source_dir = staged.getDirectory(),

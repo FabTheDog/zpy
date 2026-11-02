@@ -106,6 +106,18 @@ def test_type_completeness():
     assert (pathlib.Path(fixture.__path__[0]) / "py.typed").exists()
 
 
+def test_field_and_variant_docs():
+    # A variant's doc, or its payload type's when it has none.
+    assert fixture.Shape.dot.__doc__ == "A point, without area."
+    assert fixture.Shape.circle.__doc__ == "Of this radius."
+    assert fixture.Shape.rect.__doc__ == "Axis-aligned, `w` by `h`."
+    assert fixture.Shape.poly.__doc__ is None  # anonymous payload
+    # Fields and enum members get attribute docstrings, which editors show.
+    source = pathlib.Path(fixture.__file__).read_text()
+    assert '    y: float = 0.5\n    """Half way up by default."""\n' in source
+    assert '    green = 1\n    """The default of a brush."""\n' in source
+
+
 def test_skipped_declarations():
     assert not hasattr(fixture, "generic")  # anytype parameter
     assert not hasattr(fixture, "hidden")  # config.skip

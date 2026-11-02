@@ -38,6 +38,19 @@ pub const Index = struct {
         return index.fnIn(container, fn_name);
     }
 
+    /// Doc comment of a struct field, a union variant or an enum member.
+    pub fn fieldDoc(index: *Index, type_name: []const u8, field_name: []const u8) ?[]const u8 {
+        const container = index.findContainer(type_name) orelse return null;
+        const tree = container.tree;
+        for (container.members) |node| {
+            const field = tree.fullContainerField(node) orelse continue;
+            if (std.mem.eql(u8, tree.tokenSlice(field.ast.main_token), field_name)) {
+                return index.doc(tree, field.firstToken());
+            }
+        }
+        return null;
+    }
+
     const Container = struct {
         tree: *const Ast,
         /// File of `tree`, relative to `Index.dir`.
@@ -197,6 +210,8 @@ test Index {
         \\/// In meters.
         \\pub const Vec3 = struct {
         \\    x: f64,
+        \\    /// Up.
+        \\    y: f64 = 0,
         \\
         \\    /// Scales by `k`.
         \\    pub fn mul(self: Vec3, k: f64) Vec3 {
@@ -221,6 +236,9 @@ test Index {
     try std.testing.expectEqual(2, mul.params.len);
     try std.testing.expectEqualStrings("k", mul.params[1]);
     try std.testing.expectEqual(null, index.fnDoc("math.Vec3", "missing"));
+    try std.testing.expectEqualStrings("Up.", index.fieldDoc("math.Vec3", "y").?);
+    try std.testing.expectEqual(null, index.fieldDoc("math.Vec3", "x"));
+    try std.testing.expectEqual(null, index.fieldDoc("math.Vec3", "mul"));
     try std.testing.expectEqualStrings("Scales by `k`.", index.fnDoc("root", "scale").?.doc.?);
     try std.testing.expectEqual(null, index.typeDoc("other.Vec3"));
     try std.testing.expectEqual(null, index.typeDoc("root"));

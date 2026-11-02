@@ -5,7 +5,12 @@ const std = @import("std");
 const bindgen = @import("bindgen");
 
 pub const api = struct {
-    pub const Color = enum { red, green, blue };
+    pub const Color = enum {
+        red,
+        /// The default of a brush.
+        green,
+        blue,
+    };
     pub const Level = enum(c_int) { low = -1, high = 10 };
 
     pub const answer: i32 = 42;
@@ -13,6 +18,7 @@ pub const api = struct {
     /// A point in the plane.
     pub const Vec2 = struct {
         x: f64,
+        /// Half way up by default.
         y: f64 = 0.5,
 
         pub const zero: Vec2 = .{ .x = 0, .y = 0 };
@@ -34,11 +40,14 @@ pub const api = struct {
     pub const Rgb = extern struct { r: u8, g: u8, b: u8 };
 
     pub const Shape = union(enum) {
+        /// A point, without area.
         dot,
+        /// Of this radius.
         circle: f64,
         rect: Rect,
         poly: struct { sides: u32 = 3 },
 
+        /// Axis-aligned, `w` by `h`.
         pub const Rect = struct { w: f64, h: f64 };
 
         pub fn area(self: Shape) f64 {

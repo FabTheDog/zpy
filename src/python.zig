@@ -18,8 +18,11 @@
 //! - Every signature is annotated: parameters with what they accept (see
 //!   `paramHint`), results with the class they return, so the module
 //!   type-checks as a `py.typed` package.
-//! - Doc comments become docstrings, with the Zig spellings inside backticks
-//!   turned into the Python ones: camelCase functions to snake_case,
+//! - Doc comments become docstrings: on fields and enum members as the
+//!   attribute docstrings editors show, on a union variant as the docstring
+//!   of its constructor, falling back to the doc of its payload type. The
+//!   Zig spellings inside backticks are turned into the Python ones:
+//!   camelCase functions to snake_case,
 //!   `error.Name` to `Name`, `null`, `true` and `false` to their literals.
 
 const std = @import("std");
@@ -121,6 +124,7 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             if (info.field_names.len == 0) try w.writeAll("    pass\n");
             inline for (info.field_names, info.field_values) |name, value| {
                 try w.print("    {f} = {d}\n", .{ py(name), value });
+                if (g.docs.fieldDoc(@typeName(t.T), name)) |d| try writeDocstring(w, d, "    ");
             }
             try g.writeClassAttrs(t);
             try g.writeMethods(t, true);
@@ -150,6 +154,7 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                     }
                 }
                 try w.writeAll("\n");
+                if (g.docs.fieldDoc(@typeName(t.T), name)) |d| try writeDocstring(w, d, "    ");
             }
             try g.writeClassAttrs(t);
             try g.writeMethods(t, has_doc or info.field_names.len > 0);
@@ -194,8 +199,15 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
             try g.writeClassAttrs(t);
             inline for (info.field_names, info.field_types) |name, F| {
                 try w.writeAll("\n");
+                // The variant's own doc, or that of its payload type.
+                const doc = g.docs.fieldDoc(@typeName(t.T), name) orelse
+                    if (comptime abi.kindOf(F) == .value) g.docs.typeDoc(@typeName(F)) else null;
                 switch (comptime abi.kindOf(F)) {
-                    .void => try w.print("    @staticmethod\n    def {f}() -> {s}:\n        return {s}(\"{f}\")\n", .{ py(name), t.name, t.name, py(name) }),
+                    .void => {
+                        try w.print("    @staticmethod\n    def {f}() -> {s}:\n", .{ py(name), t.name });
+                        if (doc) |d| try writeDocstring(w, d, "        ");
+                        try w.print("        return {s}(\"{f}\")\n", .{ t.name, py(name) });
+                    },
                     .value => {
                         // Typed as two overloads: the payload, or its fields.
                         const payload = comptime api.typeName(F);
@@ -203,13 +215,15 @@ fn Gen(comptime root: type, comptime cfg: Config) type {
                         try w.print("    @_overload\n    @staticmethod\n    def {f}(", .{py(name)});
                         try writeFieldParams(w, F);
                         try w.print(") -> {s}: ...\n", .{t.name});
-                        try w.print("    @staticmethod\n    def {f}(*args: _Any, **kwargs: _Any) -> {s}:\n        return {s}(\"{f}\", _payload({s}, args, kwargs))\n", .{
-                            py(name), t.name, t.name, py(name), payload,
-                        });
+                        try w.print("    @staticmethod\n    def {f}(*args: _Any, **kwargs: _Any) -> {s}:\n", .{ py(name), t.name });
+                        if (doc) |d| try writeDocstring(w, d, "        ");
+                        try w.print("        return {s}(\"{f}\", _payload({s}, args, kwargs))\n", .{ t.name, py(name), payload });
                     },
-                    else => try w.print("    @staticmethod\n    def {f}(value: {s}) -> {s}:\n        return {s}(\"{f}\", value)\n", .{
-                        py(name), comptime paramHint(F), t.name, t.name, py(name),
-                    }),
+                    else => {
+                        try w.print("    @staticmethod\n    def {f}(value: {s}) -> {s}:\n", .{ py(name), comptime paramHint(F), t.name });
+                        if (doc) |d| try writeDocstring(w, d, "        ");
+                        try w.print("        return {s}(\"{f}\", value)\n", .{ t.name, py(name) });
+                    },
                 }
             }
             try g.writeMethods(t, true);
